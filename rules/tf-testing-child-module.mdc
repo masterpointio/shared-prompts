@@ -1,0 +1,879 @@
+---
+description: Prompt to develop Terraform/OpenTofu tests for child modules
+alwaysApply: false
+---
+# Terraform/Tofu Testing Standards for Child Modules
+
+## Development process for generating quality test code
+1. Survey the terraform or tofu child module repo.
+2. Make a list of the files, and the modules/resources/locals/data in each file.
+3. First identify 2-3 easy tests to start with IF NO TESTS exist.
+4. Share back in the AI chat so your pair programming partner can direct and give feedback.
+5. If there are no tests, only add tests to a single file, and then run tofu or terraform test (ask the human for which) to ensure they work.
+6. Make small, incremental, steady code changes ensuring that the tests pass as you progressively complete work.
+7. Format the generated code after ensuring that the tests pass: `terraform fmt -recursive` or `tofu fmt -recursive`.
+
+## File Structure and Organization
+
+- Test files MUST be organized by scenario type:
+  - tests/locals.tftest.hcl - Core locals logic validation (ONLY include this file if we have local { ... } blocks in the *.tf files)
+  - tests/main.tftest.hcl - Basic happy path tests for resources and logic in main.tf
+  - tests/data.tftest.hcl - Basic happy path tests for data sources and related logic
+  - tests/*.tftest.hcl - Basic happy path tests for other *.tf files that might exist in the repo (for example, ssm.tf)
+  - tests/edge_cases.tftest.hcl - Empty inputs, missing fields, boundary conditions
+  - tests/complex_scenarios.tftest.hcl - Real-world multi-entity scenarios
+
+- Test fixtures organization:
+  - tests/fixtures/ - Directory for test fixture configurations
+  - tests/fixtures/minimal/ - Basic required configuration scenarios
+  - tests/fixtures/complex/ - Multi-entity, realistic scenarios
+  - tests/fixtures/edge_cases/ - Boundary conditions and unusual inputs
+  - Note: Keep fixtures separate from examples/ directory - examples are for documentation, fixtures are for providing data to tests
+
+- Reference existing structure: @locals.tftest.hcl, @main.tf, and other *.tf files as needed.
+
+## Test Command Strategy: Plan vs Apply
+
+### Use plan for Most Tests (Primary Focus)
+
+**Default Choice**: Use `command = plan` for the majorithy of child module tests.
+
+Plan tests validate all core module functionality without requiring actual resource creation:
+- **Module logic**: Validate locals computations, conditional logic, and data transformations
+- **Resource configuration**: Verify that resources will be created with correct attributes, tags, and settings
+- **Variable processing**: Test how input variables are transformed and applied to resources
+- **Conditional resources**: Test that resources are included/excluded based on feature flags
+- **Resource relationships**: Ensure proper key generation for for_each loops and resource dependencies
+- **Variable validations**: Test that invalid inputs are properly rejected
+
+**Benefits**: 
+- Fast execution (no provider API calls)
+- Tests module logic thoroughly
+- Works without credentials
+- Safe for CI/CD pipelines
+- Catches configuration errors early
+
+✅ DO: Use plan for logic testing (most tests)
+```hcl
+run "test_locals_logic" {
+  command = plan  # Tests our module logic
+
+  assert {
+    condition = length(local.computed_tags) == expected_count
+    error_message = "Tag computation logic failed"
+  }
+}
+```
+
+### Use apply with Mocked Providers (Limited Usage)
+
+**Exception, Not the Rule**: Use `command = apply` only for the few remaining tests when you need to test resource or module interactions that cannot be validated with plan.
+
+Apply tests should be used ONLY when:
+- **Cross-resource dependencies**: Testing that one resource's output is correctly consumed by another resource
+- **Resource ID propagation**: Verifying that resource IDs, ARNs, or computed values flow correctly between resources
+- **Module composition**: Testing how multiple modules work together in complex scenarios
+- **Provider behavior**: Testing specific provider interactions that require actual resource state
+
+**Apply tests are NOT needed for**:
+- Testing resource attributes or configurations (use plan instead)
+- Testing module logic or locals (use plan instead)
+- Testing variable validations (use plan instead)
+- Testing conditional resource creation (use plan instead)
+
+**Requirements**:
+- ALL apply tests MUST use mock providers - no real infrastructure
+- Apply tests should be minimal and focused on specific interactions
+- Most module testing should still use plan tests
+
+✅ DO: Use apply with mocked providers for integration testing
+```hcl
+run "test_complete_infrastructure_integration" {
+  command = apply  # Uses mocked providers only
+  
+  mock_provider "aws" {
+    mock_data "aws_caller_identity" {
+      defaults = { account_id = "123456789012" }
+    }
+    mock_resource "aws_vpc" {
+      defaults = { id = "vpc-mock123" }
+    }
+    mock_resource "aws_security_group" {
+      defaults = { id = "sg-mock123" }
+    }
+    mock_resource "aws_instance" {
+      defaults = { 
+        id = "i-mock123"
+        private_ip = "10.0.1.100"
+      }
+    }
+  }
+
+  variables {
+    vpc_id = "vpc-mock123"
+    instance_type = "t3.micro"
+    environment = "production"
+    enable_monitoring = true
+  }
+
+  # Test resource creation and interdependencies
+  assert {
+    condition = aws_instance.main.vpc_security_group_ids[0] == aws_security_group.main.id
+    error_message = "Instance should reference the created security group"
+  }
+
+  assert {
+    condition = aws_cloudwatch_log_group.monitoring[0].name == "/aws/ec2/${aws_instance.main.id}"
+    error_message = "Log group should be created with instance ID when monitoring enabled"
+  }
+
+  # Test that enabling monitoring creates all expected resources
+  assert {
+    condition = length(aws_cloudwatch_log_group.monitoring) == 1
+    error_message = "Monitoring should create log group when enabled"
+  }
+}
+```
+
+## Testing Requirements for Local Variables
+When analyzing `@locals.tf` or `locals {}` blocks, focus on testing **crucial transformations and computations** that contain important business logic.
+
+### Testing Strategy
+
+**Identify Critical Operations**: Test locals that:
+- Drive resource creation decisions (enable/disable logic)
+- Transform user inputs (list-to-map, filtering, merging)
+- Generate resource keys for `for_each` loops
+- Contain conditional logic with multiple branches
+
+### Core Test Patterns
+
+✅ DO: Test conditional logic
+```hcl
+run "test_instance_sizing_logic" {
+  command = plan
+  
+  variables {
+    environment = "production"
+    workload_type = "compute-heavy"
+  }
+
+  assert {
+    condition = local.instance_type == "c5.2xlarge"
+    error_message = "Production compute-heavy workloads should use c5.2xlarge"
+  }
+}
+```
+
+✅ DO: Test enabled/disabled features
+```hcl
+run "test_monitoring_disabled" {
+  command = plan
+
+  variables {
+    enable_monitoring = false
+  }
+
+  assert {
+    condition = local.monitoring_config == null
+    error_message = "Monitoring config should be null when disabled"
+  }
+}
+```
+
+✅ DO: Test data transformations
+```hcl
+run "test_user_role_mapping" {
+  command = plan
+
+  variables {
+    user_list = ["alice", "bob", "charlie"]
+    admin_users = ["alice"]
+    default_role = "viewer"
+  }
+
+  assert {
+    condition = local.user_roles["alice"] == "admin"
+    error_message = "Alice should be assigned admin role"
+  }
+
+  assert {
+    condition = local.user_roles["bob"] == "viewer" && local.user_roles["charlie"] == "viewer"
+    error_message = "Bob and Charlie should be assigned default viewer role"
+  }
+
+  assert {
+    condition = length(keys(local.user_roles)) == 3
+    error_message = "All users should be included in role mapping"
+  }
+}
+```
+
+✅ DO: Test merging operations
+```hcl
+run "test_tag_merging" {
+  command = plan
+
+  variables {
+    common_tags = { Environment = "prod" }
+    additional_tags = { Project = "web-app" }
+  }
+
+  assert {
+    condition = local.merged_tags["Environment"] == "prod"
+    error_message = "Common tags should be preserved"
+  }
+
+  assert {
+    condition = can(local.merged_tags["Name"])
+    error_message = "Default Name tag should be generated"
+  }
+}
+```
+
+### Testing Priorities
+
+**High Priority**: Conditional logic, enable/disable flags, data transformations for `for_each`
+**Medium Priority**: Complex string operations, filtering logic
+**Low Priority**: Simple passthrough or static assignments
+
+## Testing Requirements for Variable Validations
+When analyzing `@variables.tf`, identify and test validation blocks that enforce critical business rules and data integrity. Variable validations are crucial safeguards that prevent invalid configurations from reaching resources.
+
+#### Validation Testing Strategy
+
+**High-Priority Validations to Test**:
+1. **Format Validations**: Email addresses, URLs, ARNs, patterns using `regex()` or `can()`
+2. **Enum/Choice Validations**: Fields with restricted sets of allowed values using `contains()`
+3. **Cross-Field Dependencies**: Validations where multiple fields must be compatible
+4. **Complex Nested Validations**: Multi-level loops through lists and maps
+5. **Length and Range Constraints**: String lengths, numeric ranges, collection sizes
+6. **Provider-Specific Requirements**: JSON encoding, specific formats required by APIs
+
+#### Core Validation Test Patterns
+
+✅ DO: Test regex format validations (emails, domains, patterns)
+```hcl
+run "test_email_validation_success" {
+  command = plan
+
+  variables {
+    users = {
+      "user1" = {
+        primary_email = "valid.user@example.com"
+        family_name = "Doe"
+        given_name = "John"
+      }
+    }
+  }
+
+  assert {
+    condition = length(var.users) == 1
+    error_message = "Valid email should pass validation"
+  }
+}
+
+run "test_email_validation_failure" {
+  command = plan
+
+  variables {
+    users = {
+      "user1" = {
+        primary_email = "invalid-email"
+        family_name = "Doe"
+        given_name = "John"
+      }
+    }
+  }
+
+  expect_failures = [var.users]
+}
+```
+
+✅ DO: Test enum/choice validations with contains()
+```hcl
+run "test_role_validation_success" {
+  command = plan
+
+  variables {
+    users = [
+      {
+        email = "user@example.com"
+        name = "Test User"
+        roles = ["standard", "admin"]
+        username = "testuser"
+      }
+    ]
+  }
+
+  assert {
+    condition = length(var.users) == 1
+    error_message = "Valid roles should pass validation"
+  }
+}
+
+run "test_role_validation_failure" {
+  command = plan
+
+  variables {
+    users = [
+      {
+        email = "user@example.com"
+        name = "Test User"
+        roles = ["invalid_role"]
+        username = "testuser"
+      }
+    ]
+  }
+
+  expect_failures = [var.users]
+}
+```
+
+✅ DO: Test conditional requirement validations
+```hcl
+run "test_conditional_requirement_valid" {
+  command = plan
+
+  variables {
+    resources = [
+      {
+        name = "prod-database"
+        environment = "production"
+        backup_enabled = true
+        backup_schedule = "0 2 * * *"  # Required when backup_enabled = true
+      }
+    ]
+  }
+
+  assert {
+    condition = length(var.resources) == 1
+    error_message = "Backup schedule should be required when backup is enabled"
+  }
+}
+
+run "test_conditional_requirement_invalid" {
+  command = plan
+
+  variables {
+    resources = [
+      {
+        name = "prod-database"
+        environment = "production"
+        backup_enabled = true
+        backup_schedule = null  # Invalid: required when backup_enabled = true
+      }
+    ]
+  }
+
+  expect_failures = [var.resources]
+}
+```
+
+#### Validation Testing Guidelines
+
+**Test Both Success and Failure Cases**:
+- **Success Tests**: Verify that valid inputs pass validation
+- **Failure Tests**: Use `expect_failures = [var.variable_name]` to ensure invalid inputs are properly rejected
+
+**Focus on Edge Cases**:
+- Boundary values (minimum/maximum lengths, edge of numeric ranges)
+- Empty or null values where applicable
+- Special characters in string validations
+- Mixed case sensitivity in enum validations
+
+**Complex Validation Patterns**:
+- **Flattened Collections**: Test validations that use `flatten()` to check nested lists
+- **Conditional Logic**: Test validations with null checks and conditional expressions
+- **Multiple Validation Blocks**: Ensure all validation rules work together correctly
+
+#### Testing Priorities for Variable Validations
+
+**High Priority**: Email/URL regex patterns, enum values, cross-field dependencies, provider API requirements. If there is a tofu or terraform specific MCP setup, use this to get specific details on provider API requirements.
+**Medium Priority**: Length constraints, numeric ranges, nested object validations
+**Low Priority**: Simple type validations, basic string patterns
+
+
+
+## Testing Requirements for Happy Path Resources
+When analyzing `@main.tf`, `@data.tf`, and other `*.tf` files, focus on testing **core module functionality** and **straightforward expected use cases** without complex edge cases or advanced scenarios.
+
+### Testing Strategy
+
+**Primary Focus**: Test basic resource creation and configuration using standard, realistic inputs that represent common deployment scenarios.
+
+**Core Areas to Test**:
+- Minimal viable configurations with only required variables
+- Resource attribute verification and direct variable-to-resource mapping
+- Simple conditional logic for enabled/disabled features
+- Basic resource relationships and dependencies
+- Standard Terraform behaviors (`dynamic` blocks, `for_each`, `count`)
+
+**File Organization**:
+- **`tests/main.tftest.hcl`** - Primary happy path tests for resources and logic in `main.tf`
+- **`tests/data.tftest.hcl`** - Happy path tests for data sources and related logic  
+- **`tests/*.tftest.hcl`** - Happy path tests for other `*.tf` files (e.g., `tests/ssm.tftest.hcl` for `ssm.tf`)
+
+### Core Test Patterns
+
+✅ DO: Test variable type handling
+```hcl 
+run "test_variable_types" {
+  command = plan
+
+  variables {
+    vpc_id          = "vpc-12345678"           # string
+    subnet_ids      = ["subnet-1", "subnet-2"] # list
+    tags            = { Environment = "test" }  # map
+    instance_count  = 2                        # number
+    enable_feature  = true                     # bool
+  }
+
+  assert {
+    condition     = length(aws_instance.main) > 0
+    error_message = "Module should create resources when provided with valid inputs"
+  }
+}
+```
+
+✅ DO: Test basic resource creation
+```
+run "test_basic_resource_creation" {
+  command = plan
+
+  variables {
+    vpc_id = "vpc-12345678"
+    name   = "test-instance"
+  }
+
+  assert {
+    condition     = aws_instance.main.vpc_id == "vpc-12345678"
+    error_message = "Instance should be created in the specified VPC"
+  }
+
+  assert {
+    condition     = length(aws_instance.main.tags) > 0
+    error_message = "Instance should have tags applied"
+  }
+}
+
+✅ DO: Test resource attribute assignment
+```hcl
+run "test_resource_configuration" {
+  command = plan
+
+  variables {
+    vpc_id        = "vpc-12345678"
+    instance_type = "t3.micro"
+    environment   = "development"
+  }
+
+  assert {
+    condition     = aws_instance.main.instance_type == var.instance_type
+    error_message = "Instance type should match input variable"
+  }
+
+  assert {
+    condition     = length(aws_instance.main.vpc_security_group_ids) > 0
+    error_message = "Instance should have security groups assigned"
+  }
+}
+```
+
+✅ DO: Test conditional logic
+```hcl
+run "test_conditional_resource_creation" {
+  command = plan
+
+  variables {
+    vpc_id              = "vpc-12345678"
+    create_load_balancer = true
+    environment         = "production"
+  }
+
+  assert {
+    condition     = aws_lb.main[0].load_balancer_type == "application"
+    error_message = "Load balancer should be created when enabled"
+  }
+
+  assert {
+    condition     = length(aws_lb.main) == 1
+    error_message = "Exactly one load balancer should be created when enabled"
+  }
+}
+```
+
+✅ DO: Test for_each and count logic
+```hcl
+run "test_multiple_resource_creation" {
+  command = plan
+
+  variables {
+    vpc_id     = "vpc-12345678"
+    subnet_ids = ["subnet-1", "subnet-2", "subnet-3"]
+  }
+
+  assert {
+    condition     = length(aws_route_table_association.main) == 3
+    error_message = "Should create route table association for each subnet"
+  }
+
+  assert {
+    condition     = contains(keys(aws_route_table_association.main), "subnet-1")
+    error_message = "Route table associations should use subnet IDs as keys"
+  }
+}
+```
+
+✅ DO: Test dynamic blocks
+```hcl
+run "test_dynamic_block_configuration" {
+  command = plan
+
+  variables {
+    vpc_id = "vpc-12345678"
+    security_group_rules = [
+      {
+        type        = "ingress"
+        from_port   = 80
+        to_port     = 80
+        protocol    = "tcp"
+        cidr_blocks = ["0.0.0.0/0"]
+      },
+      {
+        type        = "ingress"
+        from_port   = 443
+        to_port     = 443
+        protocol    = "tcp"
+        cidr_blocks = ["10.0.0.0/8"]
+      }
+    ]
+  }
+
+  assert {
+    condition     = length(aws_security_group.main.ingress) == 2
+    error_message = "Security group should have 2 ingress rules from dynamic block"
+  }
+
+  assert {
+    condition     = contains([for rule in aws_security_group.main.ingress : rule.from_port], 80)
+    error_message = "Security group should include port 80 rule"
+  }
+
+  assert {
+    condition     = contains([for rule in aws_security_group.main.ingress : rule.from_port], 443)
+    error_message = "Security group should include port 443 rule"
+  }
+}
+```
+
+### Testing Priorities
+
+**High Priority**: Basic resource creation, variable-to-resource mapping, conditional resource logic, `for_each`/`count` behaviors
+**Medium Priority**: Dynamic blocks, simple resource relationships, tag application
+**Low Priority**: Resource defaults, simple passthrough configurations
+
+## Testing Requirements for Edge Cases
+When analyzing module configurations, focus on testing **common mistakes and boundary conditions** that engineers encounter in real-world scenarios.
+
+### Testing Strategy
+
+**Primary Focus**: Test scenarios that represent realistic user errors, input formatting inconsistencies, and boundary conditions that modules should handle gracefully.
+
+**Core Areas to Test**:
+- Common engineer mistakes and "fat finger" scenarios
+- Mixed data edge cases (single-item collections, empty collections)
+- Input formatting inconsistencies (hyphenated vs underscore naming, mixed case)
+- Default value behavior when optional variables are omitted
+- Expected validation failures for invalid inputs
+
+### Core Test Patterns
+
+✅ DO: Test mixed case and formatting inconsistencies
+```hcl
+run "test_mixed_case_resource_names" {
+  command = plan
+
+  variables {
+    vpc_id          = "vpc-12345678"
+    environment     = "Production"  # Mixed case - common mistake
+    project_name    = "Web-App"     # Hyphenated - may break some naming
+    owner_team      = "PLATFORM"   # All caps - may not match expected patterns
+  }
+
+  assert {
+    condition     = can(regex("^[a-z0-9-]+$", local.normalized_name))
+    error_message = "Module should normalize mixed case inputs to lowercase"
+  }
+
+  assert {
+    condition     = aws_instance.main.tags["Environment"] == "production"
+    error_message = "Environment tag should be normalized to lowercase"
+  }
+}
+
+✅ DO: Test single-item collections and empty collections
+```hcl
+run "test_single_item_and_empty_collections" {
+  command = plan
+
+  variables {
+    vpc_id              = "vpc-12345678"
+    subnet_ids          = ["subnet-12345678"]        # Single item - common edge case
+    security_group_ids  = []                         # Empty - should use defaults
+    additional_tags     = { "SingleTag" = "value" }  # Single tag instead of multiple
+  }
+
+  assert {
+    condition     = length(aws_instance.main.subnet_id) == 1
+    error_message = "Module should handle single-subnet deployments"
+  }
+
+  assert {
+    condition     = length(aws_instance.main.vpc_security_group_ids) > 0
+    error_message = "Module should create default security groups when none provided"
+  }
+
+  assert {
+    condition     = contains(keys(aws_instance.main.tags), "SingleTag")
+    error_message = "Module should preserve single additional tags"
+  }
+}
+```
+
+✅ DO: Test expected validation failures
+```hcl
+run "test_invalid_vpc_id_format_fails" {
+  command = plan
+
+  variables {
+    vpc_id = "invalid-vpc-format"  # Should fail VPC ID validation
+    name   = "test-instance"
+  }
+
+  expect_failures = [var.vpc_id]
+}
+
+run "test_empty_required_name_fails" {
+  command = plan
+
+  variables {
+    vpc_id = "vpc-12345678"
+    name   = ""  # Empty string should fail validation
+  }
+
+  expect_failures = [var.name]
+}
+```
+
+### Testing Priorities
+
+**High Priority**: Common formatting mistakes, single-item collections, validation failures, default value handling
+**Medium Priority**: Mixed case normalization, empty collections, boundary conditions
+**Low Priority**: Unusual input combinations, rarely-used edge cases
+
+## Testing Requirements for Complex Scenarios
+When analyzing multi-resource modules, focus on testing **realistic production deployments** with cross-resource dependencies and multi-provider integrations.
+
+### Testing Strategy
+
+**Primary Focus**: Test complex, realistic scenarios that represent actual production deployments with multiple interconnected resources and external service integrations.
+
+**Core Areas to Test**:
+- Cross-resource dependencies and resource relationship chains
+- Multi-provider integration with external services
+- Production-like configurations (multi-AZ, scaling, redundancy)
+- Compliance requirements and complex tagging strategies
+- Resource interdependencies and proper ID propagation
+
+### Core Test Patterns
+
+✅ DO: Test cross-resource dependencies with realistic production setup
+```hcl
+run "test_production_web_application_stack" {
+  command = plan
+
+  variables {
+    # Network Configuration
+    vpc_id                    = "vpc-12345678"
+    public_subnet_ids         = ["subnet-12345678", "subnet-87654321"]
+    private_subnet_ids        = ["subnet-11111111", "subnet-22222222"]
+    
+    # Application Configuration
+    environment              = "production"
+    application_name         = "web-api"
+    instance_types           = {
+      web = "t3.large"
+      api = "c5.xlarge"
+    }
+    
+    # Scaling and Redundancy
+    min_capacity             = 2
+    max_capacity             = 10
+    desired_capacity         = 4
+    multi_az_enabled         = true
+    
+    # Security and Compliance
+    enable_waf               = true
+    enable_cloudtrail        = true
+    encryption_at_rest       = true
+    compliance_tags          = {
+      "CostCenter"     = "Engineering"
+      "DataClass"      = "Internal"
+      "Compliance"     = "SOC2"
+      "BackupRequired" = "true"
+    }
+    
+    # External Integrations
+    monitoring_endpoints     = ["https://api.datadog.com", "https://hooks.slack.com/services/xxx"]
+    dns_zone_id             = "Z1234567890"
+    certificate_domain      = "api.company.com"
+  }
+
+  # Test complex resource interdependencies
+  assert {
+    condition     = aws_lb.main.security_groups[0] == aws_security_group.alb.id
+    error_message = "Load balancer should reference the ALB security group"
+  }
+
+  assert {
+    condition     = aws_autoscaling_group.main.target_group_arns[0] == aws_lb_target_group.main.arn
+    error_message = "Auto scaling group should be attached to load balancer target group"
+  }
+
+  assert {
+    condition     = length(aws_instance.main) >= var.min_capacity
+    error_message = "Should create at least minimum required instances"
+  }
+
+  # Test multi-AZ distribution
+  assert {
+    condition     = length(distinct([for instance in aws_instance.main : instance.availability_zone])) > 1
+    error_message = "Instances should be distributed across multiple availability zones"
+  }
+
+  # Test compliance tagging
+  assert {
+    condition     = contains(keys(aws_instance.main[0].tags), "DataClass")
+    error_message = "All instances should have compliance tags applied"
+  }
+}
+```
+
+✅ DO: Test multi-provider integration scenario
+```hcl
+run "test_aws_with_external_monitoring_integration" {
+  command = plan
+
+  mock_provider "aws" {
+    mock_data "aws_caller_identity" {
+      defaults = { account_id = "123456789012" }
+    }
+    mock_resource "aws_instance" {
+      defaults = { 
+        id = "i-1234567890abcdef0"
+        private_ip = "10.0.1.100"
+      }
+    }
+  }
+
+  mock_provider "datadog" {
+    mock_resource "datadog_monitor" {
+      defaults = { id = "12345678" }
+    }
+  }
+
+  variables {
+    # AWS Infrastructure
+    vpc_id                   = "vpc-12345678"
+    subnet_ids               = ["subnet-12345678", "subnet-87654321"]
+    instance_type            = "t3.medium"
+    
+    # External Service Integration
+    enable_datadog_monitoring = true
+    datadog_api_key          = "test-api-key"
+    monitoring_thresholds    = {
+      cpu_high    = 80
+      memory_high = 85
+      disk_high   = 90
+    }
+    
+    # DNS and SSL
+    domain_name              = "app.company.com"
+    enable_ssl               = true
+    
+    # Backup and DR
+    backup_schedule          = "0 2 * * *"
+    cross_region_backup      = true
+    dr_region               = "us-west-2"
+  }
+
+  # Test AWS resource creation
+  assert {
+    condition     = aws_instance.main.instance_type == "t3.medium"
+    error_message = "AWS instance should be created with specified type"
+  }
+
+  # Test external monitoring integration
+  assert {
+    condition     = datadog_monitor.cpu_monitor.thresholds.critical == 80
+    error_message = "Datadog monitor should use configured CPU threshold"
+  }
+
+  # Test cross-service resource references
+  assert {
+    condition     = datadog_monitor.instance_monitor.query == "avg:system.cpu.user{host:${aws_instance.main.id}}"
+    error_message = "Datadog monitor should reference AWS instance ID"
+  }
+ }
+```
+
+### Testing Priorities
+
+**High Priority**: Cross-resource dependencies, multi-AZ deployments, resource ID propagation, compliance tagging
+**Medium Priority**: Multi-provider integration, scaling scenarios, complex conditional logic
+**Low Priority**: Advanced configurations, rarely-used provider features
+
+
+
+
+## Mock Provider Configuration (REQUIRED)
+- ALL tests MUST use mock providers - no exceptions
+- Apply tests will fail without mock provider definitions
+- Plan tests should include mocks for consistency
+
+### Examples of mocked providers
+
+Example of mocked AWS provider
+```hcl
+mock_provider "aws" {
+  mock_data "aws_region" {
+    defaults = { name = "us-east-1" }
+  }
+  mock_data "aws_ami" {
+    defaults = { id = "ami-12345678" } # ONLY if you need an aws_ami
+  }
+  mock_data "aws_caller_identity" {
+    defaults = { account_id = "123456789012" }
+  }
+  mock_data "aws_iam_policy_document" {
+    defaults = {
+      json = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"ec2.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}"
+    }
+  }
+  mock_resource "aws_launch_template" {
+    defaults = {
+      id = "lt-mock123456789" # ONLY if you need an aws_launch_template
+    }
+  }
+}
+```
+
+Example of mocked Tailscale provider
+```hcl
+mock_provider "tailscale" {
+  mock_resource "tailscale_tailnet_key" {
+    defaults = { key = "tskey-test-123456789" }
+  }
+}
+```
