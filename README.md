@@ -10,7 +10,7 @@ You can keep it basic and copy individual Cursor Rules into projects or use `rul
 
 [`rule-tool`](https://github.com/circleci-petri/rule-tool) is a go CLI tool that generates symlinks between a centrally managed Cursor Rules repo and various projects. The advantage is that you're able to reference or pull in the same central set of Cursor Rules across multiple projects.
 
-```
+```bash
 shared-prompts/
 └── rules/
     ├── dockerfile-best-practices.mdc
