@@ -19,12 +19,12 @@ shared-prompts/
 
 project-A/.cursorrules/
 ├── tf-testing-child-module.mdc → ../../shared-prompts/rules/tf-testing-child-module.mdc
-├── tf-root-module-layout.mdc → ../../shared-prompts/rules/tf-root-module-layout.mdc
+├── tf-root-module-layout.mdc   → ../../shared-prompts/rules/tf-root-module-layout.mdc
 └── ...
 
 project-B/.cursorrules/
 ├── dockerfile-best-practices.mdc → ../../shared-prompts/rules/dockerfile-best-practices.mdc
-├── tf-testing-child-module.mdc → ../../shared-prompts/rules/tf-testing-child-module.mdc
+├── tf-testing-child-module.mdc   → ../../shared-prompts/rules/tf-testing-child-module.mdc
 └── ...
 ```
 
