@@ -1,13 +1,14 @@
 # shared-prompts
+
 Masterpoint's open source collection of AI/LLM prompts, Cursor rules, and templates for more effective workflows.
 
 ## How to Use
+
 You can keep it basic and copy individual Cursor Rules into projects or use `rule-tool` to create symlinks in multiple projects.
 
 ### Using `rule-tool` to symlink Cursor Rules in repos
 
 [`rule-tool`](https://github.com/circleci-petri/rule-tool) is a go CLI tool that generates symlinks between a centrally managed Cursor Rules repo and various projects. The advantage is that you're able to reference or pull in the same central set of Cursor Rules across multiple projects.
-
 
 ```
 shared-prompts/
@@ -41,18 +42,19 @@ To start using `rule-tool`,
 
 3. Export an env var `RULE_TOOL_PATH` that points to the shared-prompts repo,
 
-    ```bash
-    export RULE_TOOL_PATH=$HOME/tooling/shared-prompts
-    ```
+   ```bash
+   export RULE_TOOL_PATH=$HOME/tooling/shared-prompts
+   ```
 
-    You can also easily add this to your respective shell config,
-    ```bash
-    # bashrc
-    echo 'export RULE_TOOL_PATH=$HOME/tooling/shared-prompts' >> ~/.bashrc
-    
-    # zshrc
-    echo 'export RULE_TOOL_PATH=$HOME/tooling/shared-prompts' >> ~/.zshrc
-    ```
+   You can also easily add this to your respective shell config,
+
+   ```bash
+   # bashrc
+   echo 'export RULE_TOOL_PATH=$HOME/tooling/shared-prompts' >> ~/.bashrc
+
+   # zshrc
+   echo 'export RULE_TOOL_PATH=$HOME/tooling/shared-prompts' >> ~/.zshrc
+   ```
 
    **Please note**, `rule-tool` by convention expects to find a folder named `rules` within the `RULE_TOOL_PATH` folder.
 
